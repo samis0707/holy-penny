@@ -142,9 +142,16 @@ sensors, so the pose is real:
   coin and collect it.
 
 On iOS 13+ both sensors need `requestPermission()`, which only works from a
-user gesture — hence the START AR button. If orientation access is refused or
-the device has no sensors, the app says so instead of pretending to track;
-refused *motion* access is non-fatal and degrades to look-around-only.
+user gesture — hence the START AR button. `App.startAR()` requests tracking
+*before* the camera for exactly this reason: `getUserMedia()`'s own camera
+prompt is a separate, more lenient permission system, but awaiting it first
+consumes the tap's "transient activation" that `requestPermission()` needs.
+Ask for the camera first and Safari silently denies the sensors without ever
+showing their dialog — it looks like "motion & orientation access denied"
+even though the user only ever saw and accepted the camera prompt. If
+orientation access is refused or the device has no sensors, the app says so
+instead of pretending to track; refused *motion* access is non-fatal and
+degrades to look-around-only.
 
 `AlvaTrackingProvider` remains as the seam for real visual SLAM, but it is a
 placeholder that reports a static identity pose and is not wired into the app.

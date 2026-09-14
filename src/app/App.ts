@@ -398,8 +398,21 @@ export class App {
   }
 
   /**
-   * Start the full AR session: camera -> tracking -> game.
+   * Start the full AR session: tracking -> camera -> game.
    * Guarded against double-tap; failures surface on the StartScreen.
+   *
+   * Tracking is requested FIRST and camera second - not the more obvious
+   * order - because of an iOS Safari quirk: `DeviceOrientationEvent
+   * .requestPermission()` / `DeviceMotionEvent.requestPermission()` only
+   * show their dialog while the tap that triggered this handler is still
+   * "live" (transient activation). Any other prompt awaited first -
+   * `getUserMedia()`'s camera dialog included - consumes that activation,
+   * so by the time we asked for sensors Safari silently denied them
+   * without ever showing a dialog. That looked like "AR start failed:
+   * motion & orientation access denied" even though the user had only
+   * ever been shown (and accepted) the camera prompt. Requesting sensors
+   * first keeps the tap fresh for them; the camera permission system is
+   * more lenient about timing, so it is safe to ask for second.
    */
   async startAR(): Promise<void> {
     if (this.starting || this.started) {
@@ -407,18 +420,10 @@ export class App {
     }
     this.starting = true;
     try {
-      this.startScreen.setStatus('Starting camera...');
+      this.startScreen.setStatus('Starting tracking...');
       this.startScreen.setButtonEnabled(false);
 
-      // Start camera
-      await this.cameraSource.start();
-
-      // Video element is only available once the camera runs.
-      const video = this.cameraSource.getVideoElement();
-      this.setupVideoBackground(video);
-
-      // Start tracking, then drive the game through READY -> PLAYING.
-      this.startScreen.setStatus('Starting tracking...');
+      // Start tracking (sensor permission prompts) before anything else.
       await this.tracking.start();
 
       // Sensor access is the one failure we cannot paper over: without it
@@ -428,6 +433,17 @@ export class App {
         throw new Error(trackingIssue);
       }
 
+      // Start camera
+      this.startScreen.setStatus('Starting camera...');
+      await this.cameraSource.start();
+
+      // Video element is only available once the camera runs.
+      const video = this.cameraSource.getVideoElement();
+      this.setupVideoBackground(video);
+
+      // Drive the game through READY -> PLAYING. `requestCameraAndTracking`
+      // calls `tracking.start()` again, but the provider no-ops once it is
+      // no longer STOPPED, so this never re-prompts.
       await this.game.start();
       await this.game.requestCameraAndTracking();
 

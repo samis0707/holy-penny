@@ -168,10 +168,12 @@ describe('App wiring', () => {
 
   it('guards against double-tap on start', async () => {
     const fakes = makeFakes();
-    let resolveStart!: (value: unknown) => void;
-    fakes.cameraSource.start.mockImplementation(
+    // Tracking starts first (see startAR's doc comment), so that is what
+    // needs to hang to catch a concurrent second startAR() call in flight.
+    let resolveStart!: () => void;
+    fakes.tracking.start.mockImplementation(
       () =>
-        new Promise((resolve) => {
+        new Promise<void>((resolve) => {
           resolveStart = resolve;
         })
     );
@@ -180,11 +182,12 @@ describe('App wiring', () => {
 
     const first = app.startAR();
     const second = app.startAR();
-    expect(fakes.cameraSource.start).toHaveBeenCalledTimes(1);
-    resolveStart(null);
+    expect(fakes.tracking.start).toHaveBeenCalledTimes(1);
+    resolveStart();
     await first;
     await second;
 
+    expect(fakes.tracking.start).toHaveBeenCalledTimes(1);
     expect(fakes.cameraSource.start).toHaveBeenCalledTimes(1);
     expect(app.isRunning()).toBe(true);
   });
@@ -203,6 +206,47 @@ describe('App wiring', () => {
     const button = document.querySelector('button');
     expect(button).not.toBeNull();
     expect((button as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('requests tracking (sensor permissions) before the camera', async () => {
+    // Regression test: requesting the camera first burns the iOS Safari tap
+    // that DeviceOrientationEvent.requestPermission() needs, so sensors get
+    // silently denied even though the user only ever saw the camera prompt.
+    // Tracking must be started - and its permission state checked - before
+    // the camera is touched at all.
+    const fakes = makeFakes();
+    const callOrder: string[] = [];
+    fakes.tracking.start.mockImplementation(async () => {
+      callOrder.push('tracking');
+    });
+    fakes.cameraSource.start.mockImplementation(async () => {
+      callOrder.push('camera');
+      return null;
+    });
+    const app = new App(makeOptions(fakes));
+    apps.push(app);
+
+    await app.startAR();
+
+    expect(callOrder).toEqual(['tracking', 'camera']);
+  });
+
+  it('bails out on denied sensor permission without ever requesting the camera', async () => {
+    const fakes = makeFakes();
+    const tracking = {
+      ...fakes.tracking,
+      getPermissionState: jest.fn().mockReturnValue('denied'),
+    };
+    const app = new App(makeOptions({ ...fakes, tracking }));
+    apps.push(app);
+
+    await app.startAR();
+
+    expect(app.isRunning()).toBe(false);
+    expect(fakes.cameraSource.start).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      'motion & orientation access denied - allow it in the browser settings and try again'
+    );
   });
 
   it('stopCamera stops tracking/camera/animation and resets running state', async () => {
