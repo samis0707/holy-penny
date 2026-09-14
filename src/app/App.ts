@@ -2,9 +2,9 @@
  * App - Main application class
  * Orchestrates camera, tracking, rendering, and game logic.
  *
- * Phase 2 (camera video plane) + Phases 4+11 (Lanes A-D wiring, iOS UX):
+ * Phase 2 (camera feed) + Phases 4+11 (Lanes A-D wiring, iOS UX):
  * - CameraSource for getUserMedia video
- * - AlvaTrackingProvider (or injected TrackingProvider) for 6DoF poses
+ * - DeviceTrackingProvider (or injected TrackingProvider) for camera poses
  * - Player / ARWorld / Coin / Beacon / Game (Lanes B+C)
  * - HUD / TrackingStatus / StartScreen (Lane D + iOS polish)
  * - SoundPlayer / TrackingMetrics (Phase 11)
@@ -15,7 +15,7 @@
 
 import { CameraSource, cameraSource } from '../tracking/CameraSource';
 import type { TrackingProvider, CameraPose } from '../tracking/TrackingProvider';
-import { AlvaTrackingProvider } from '../tracking/AlvaTrackingProvider';
+import { DeviceTrackingProvider } from '../tracking/DeviceTrackingProvider';
 import { StartScreen } from '../ui/StartScreen';
 import { HUD } from '../ui/HUD';
 import { TrackingStatus } from '../ui/TrackingStatus';
@@ -90,6 +90,8 @@ export interface AppGame {
 
 export interface AppOptions {
   canvas?: HTMLCanvasElement;
+  /** Long-side field of view of the physical camera, in degrees. */
+  cameraFovDeg?: number;
   cameraOptions?: ConstructorParameters<typeof CameraSource>[0];
   cameraSource?: AppCameraSource;
   tracking?: TrackingProvider;
@@ -102,6 +104,27 @@ export interface AppOptions {
   sound?: AppSound;
   metrics?: AppMetrics;
   game?: AppGame;
+}
+
+/**
+ * Field of view of the physical camera along the LONG side of its frame.
+ * ~65 deg matches the main rear camera of current phones; the vertical FOV
+ * actually used for rendering is derived from this plus the video and
+ * screen aspect ratios (see App.updateCameraProjection).
+ */
+const DEFAULT_SENSOR_FOV_DEG = 65;
+const MIN_FOV_DEG = 30;
+const MAX_FOV_DEG = 120;
+
+/** Used until the stream reports its real dimensions. */
+const FALLBACK_VIDEO_WIDTH = 720;
+const FALLBACK_VIDEO_HEIGHT = 1280;
+
+function clampFov(deg: number): number {
+  if (!Number.isFinite(deg)) {
+    return DEFAULT_SENSOR_FOV_DEG;
+  }
+  return Math.min(MAX_FOV_DEG, Math.max(MIN_FOV_DEG, deg));
 }
 
 function isTestEnv(): boolean {
@@ -121,8 +144,18 @@ export class App {
   private camera!: THREE.PerspectiveCamera;
   private renderer!: THREE.WebGLRenderer;
   private videoTexture: THREE.VideoTexture | null = null;
-  private videoMesh: THREE.Mesh | null = null;
   private animationFrameId = 0;
+
+  // Camera feed background: rendered as a screen-space pass before the AR
+  // scene, so it always fills the viewport no matter where tracking puts
+  // the virtual camera.
+  private bgScene: THREE.Scene | null = null;
+  private bgCamera: THREE.OrthographicCamera | null = null;
+  private bgMesh: THREE.Mesh | null = null;
+  private videoWidth = 0;
+  private videoHeight = 0;
+  private readonly sensorFovDeg: number;
+  private orientationResizeTimer: ReturnType<typeof setTimeout> | null = null;
 
   private tracking: TrackingProvider;
   private player: GamePlayer;
@@ -147,7 +180,16 @@ export class App {
   };
 
   private readonly handleOrientationChange = (): void => {
+    // iOS still reports the previous viewport size in this event, so resize
+    // once now and once more after the rotation has settled.
     this.onResize();
+    if (this.orientationResizeTimer !== null) {
+      clearTimeout(this.orientationResizeTimer);
+    }
+    this.orientationResizeTimer = setTimeout(() => {
+      this.orientationResizeTimer = null;
+      this.onResize();
+    }, 300);
   };
 
   private readonly handleVisibilityChange = (): void => {
@@ -165,6 +207,7 @@ export class App {
   };
 
   constructor(options: AppOptions = {}) {
+    this.sensorFovDeg = clampFov(options.cameraFovDeg ?? DEFAULT_SENSOR_FOV_DEG);
     this.cameraSource = options.cameraSource
       ? options.cameraSource
       : options.cameraOptions
@@ -174,11 +217,11 @@ export class App {
     // Initialize Three.js (stubs under Jest where WebGL is unavailable).
     this.initThreeJS(options.canvas);
 
-    // Tracking + game world (Lane A/B). Video element is not available
-    // until the camera starts, so the provider starts with null.
-    this.tracking =
-      options.tracking ??
-      new AlvaTrackingProvider(null, { trackingWidth: 640, trackingHeight: 480 });
+    // Tracking + game world (Lane A/B). Real device-sensor tracking:
+    // orientation from the gyro/compass, translation from detected steps.
+    // (AlvaTrackingProvider is a placeholder that reports a static pose and
+    // is deliberately not wired up - see its file header.)
+    this.tracking = options.tracking ?? new DeviceTrackingProvider();
     this.player = options.player ?? new Player();
     this.world = options.world ?? new ARWorld();
     this.coin = options.coin ?? new Coin(this.scene);
@@ -233,23 +276,35 @@ export class App {
       return;
     }
     try {
-      // Scene
+      // Scene. No background colour of its own: the camera feed is drawn as
+      // a full-screen pass before the AR scene on every frame.
       this.scene = new THREE.Scene();
-      this.scene.background = new THREE.Color(0x000000);
+      this.scene.background = null;
 
-      // Camera
+      // Camera. Starts at the tracking origin; the FOV is replaced by one
+      // derived from the real camera stream as soon as it reports its size.
       const aspect = window.innerWidth / window.innerHeight;
-      this.camera = new THREE.PerspectiveCamera(75, aspect, 0.1, 1000);
-      this.camera.position.set(0, 0, 5);
+      this.camera = new THREE.PerspectiveCamera(DEFAULT_SENSOR_FOV_DEG, aspect, 0.05, 1000);
+      this.camera.position.set(0, 0, 0);
 
-      // Renderer
+      // Renderer. autoClear is off because every frame renders two passes:
+      // camera feed (screen space) and AR scene (world space).
       const rendererOpts: THREE.WebGLRendererParameters = canvas
-        ? { antialias: true, canvas }
-        : { antialias: true };
+        ? { antialias: true, alpha: true, canvas }
+        : { antialias: true, alpha: true };
       this.renderer = new THREE.WebGLRenderer(rendererOpts);
+      this.renderer.autoClear = false;
+      this.renderer.setClearColor(0x000000, 1);
       this.renderer.setSize(window.innerWidth, window.innerHeight);
-      this.renderer.setPixelRatio(window.devicePixelRatio);
+      // Capped: full DPR on a modern phone costs frames for no visible gain.
+      this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
       document.body.appendChild(this.renderer.domElement);
+
+      // Screen-space background pass for the camera feed.
+      this.bgScene = new THREE.Scene();
+      this.bgCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+      this.updateCameraProjection();
 
       // Add ambient light
       const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
@@ -300,6 +355,7 @@ export class App {
       },
     };
     const camera = {
+      fov: DEFAULT_SENSOR_FOV_DEG,
       aspect: 1,
       position,
       quaternion,
@@ -312,8 +368,12 @@ export class App {
     const canvas = document.createElement('canvas');
     const renderer = {
       domElement: canvas,
+      autoClear: false,
       setSize: (): void => undefined,
       setPixelRatio: (): void => undefined,
+      setClearColor: (): void => undefined,
+      clear: (): void => undefined,
+      clearDepth: (): void => undefined,
       render: (): void => undefined,
       dispose: (): void => undefined,
     };
@@ -353,13 +413,21 @@ export class App {
       // Start camera
       await this.cameraSource.start();
 
-      // Get video element and set up the background plane (existing behavior).
+      // Video element is only available once the camera runs.
       const video = this.cameraSource.getVideoElement();
-      this.setupVideoPlane(video);
+      this.setupVideoBackground(video);
 
       // Start tracking, then drive the game through READY -> PLAYING.
       this.startScreen.setStatus('Starting tracking...');
       await this.tracking.start();
+
+      // Sensor access is the one failure we cannot paper over: without it
+      // there is no pose, so say so instead of hanging on a frozen scene.
+      const trackingIssue = this.describeTrackingIssue();
+      if (trackingIssue !== null) {
+        throw new Error(trackingIssue);
+      }
+
       await this.game.start();
       await this.game.requestCameraAndTracking();
 
@@ -381,6 +449,15 @@ export class App {
       this.startScreen.setStatus('Tracking active');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
+      // Release the camera again: a half-started session would keep the
+      // camera busy and block the retry.
+      try {
+        this.tracking.stop();
+        this.cameraSource.stop();
+        this.disposeVideoBackground();
+      } catch {
+        // Best effort.
+      }
       this.startScreen.setStatus(`AR start failed: ${message}`);
       this.startScreen.setButtonEnabled(true);
     } finally {
@@ -389,35 +466,186 @@ export class App {
   }
 
   /**
-   * Create the camera-feed background plane. Falls back to "no plane"
-   * (game still runs) when video/THREE is unavailable, and never throws.
+   * Explain why tracking cannot run, or null when it can. Only the real
+   * sensor provider reports this; injected providers are trusted as-is.
    */
-  private setupVideoPlane(video: HTMLVideoElement): void {
+  private describeTrackingIssue(): string | null {
+    const provider = this.tracking as unknown as { getPermissionState?: () => string };
+    if (typeof provider.getPermissionState !== 'function') {
+      return null;
+    }
+    let permission: string;
+    try {
+      permission = provider.getPermissionState();
+    } catch {
+      return null;
+    }
+    if (permission === 'unsupported') {
+      return 'no motion sensors on this device/browser - open the page on a phone';
+    }
+    if (permission === 'denied') {
+      return 'motion & orientation access denied - allow it in the browser settings and try again';
+    }
+    return null;
+  }
+
+  /**
+   * Build the camera-feed background: a screen-filling quad drawn with an
+   * orthographic camera before the AR scene.
+   *
+   * This replaces the old world-space plane, which sat at z = -10 and
+   * therefore (a) only covered part of the viewport and (b) slid out of
+   * frame as soon as tracking moved the virtual camera.
+   *
+   * Falls back to "no background" (the game still runs) when video/THREE is
+   * unavailable, and never throws.
+   */
+  private setupVideoBackground(video: HTMLVideoElement): void {
     try {
       if (isTestEnv()) {
         return;
       }
-      // Create video texture
+      this.disposeVideoBackground();
+
       this.videoTexture = new THREE.VideoTexture(video);
       this.videoTexture.minFilter = THREE.LinearFilter;
       this.videoTexture.magFilter = THREE.LinearFilter;
+      this.videoTexture.wrapS = THREE.ClampToEdgeWrapping;
+      this.videoTexture.wrapT = THREE.ClampToEdgeWrapping;
+      this.videoTexture.colorSpace = THREE.SRGBColorSpace;
 
-      // Create a plane to display the video
-      // Use the actual video dimensions for correct aspect ratio
-      const videoWidth = video.videoWidth || 720;
-      const videoHeight = video.videoHeight || 1280;
-      const aspectRatio = videoWidth / videoHeight;
+      const geometry = new THREE.PlaneGeometry(2, 2);
+      const material = new THREE.MeshBasicMaterial({
+        map: this.videoTexture,
+        depthTest: false,
+        depthWrite: false,
+      });
+      this.bgMesh = new THREE.Mesh(geometry, material);
+      this.bgMesh.frustumCulled = false;
+      this.bgScene?.add(this.bgMesh);
 
-      // Create plane with correct aspect ratio (width, height)
-      const geometry = new THREE.PlaneGeometry(10 * aspectRatio, 10);
-      const material = new THREE.MeshBasicMaterial({ map: this.videoTexture });
-      this.videoMesh = new THREE.Mesh(geometry, material);
-      this.videoMesh.position.set(0, 0, -10);
-      this.scene.add(this.videoMesh);
+      this.refreshVideoSize(video);
+      this.updateBackgroundFit();
+      this.updateCameraProjection();
     } catch {
-      this.videoTexture = null;
-      this.videoMesh = null;
+      this.disposeVideoBackground();
     }
+  }
+
+  /** Current stream dimensions, or the portrait fallback before they arrive. */
+  private getVideoSize(): { width: number; height: number } {
+    if (this.videoWidth > 0 && this.videoHeight > 0) {
+      return { width: this.videoWidth, height: this.videoHeight };
+    }
+    return { width: FALLBACK_VIDEO_WIDTH, height: FALLBACK_VIDEO_HEIGHT };
+  }
+
+  /**
+   * Pick up the stream dimensions once they are known (they are 0 until the
+   * first frame decodes) and re-fit FOV + background when they change.
+   */
+  private refreshVideoSize(video: HTMLVideoElement): void {
+    const w = video.videoWidth;
+    const h = video.videoHeight;
+    if (!w || !h || (w === this.videoWidth && h === this.videoHeight)) {
+      return;
+    }
+    this.videoWidth = w;
+    this.videoHeight = h;
+    this.updateBackgroundFit();
+    this.updateCameraProjection();
+  }
+
+  /**
+   * Match the virtual camera's field of view to the physical one.
+   *
+   * `sensorFovDeg` describes the long side of the camera frame. The frame is
+   * then "cover"-fitted to the viewport, so whichever axis gets cropped is
+   * what the user actually sees - that visible part is the FOV we render
+   * with. Getting this wrong is what made the AR view feel zoomed in.
+   */
+  private updateCameraProjection(): void {
+    try {
+      const width = window.innerWidth || 1;
+      const height = window.innerHeight || 1;
+      const screenAspect = width / height;
+      const { width: vw, height: vh } = this.getVideoSize();
+
+      const tanHalfLong = Math.tan((this.sensorFovDeg * Math.PI) / 360);
+      const shortOverLong = Math.min(vw, vh) / Math.max(vw, vh);
+      const tanHalfH = vw >= vh ? tanHalfLong : tanHalfLong * shortOverLong;
+      const tanHalfV = vh >= vw ? tanHalfLong : tanHalfLong * shortOverLong;
+
+      const visibleTanHalfV = Math.min(tanHalfV, tanHalfH / screenAspect);
+      this.camera.fov = clampFov((2 * Math.atan(visibleTanHalfV) * 180) / Math.PI);
+      this.camera.aspect = screenAspect;
+      this.camera.updateProjectionMatrix();
+    } catch {
+      // A bad projection update must never break the frame.
+    }
+  }
+
+  /**
+   * "Cover"-fit the camera feed to the viewport by cropping the texture
+   * instead of scaling geometry: the quad always spans the whole screen and
+   * the image is never letterboxed or squashed.
+   */
+  private updateBackgroundFit(): void {
+    try {
+      if (!this.videoTexture) {
+        return;
+      }
+      const width = window.innerWidth || 1;
+      const height = window.innerHeight || 1;
+      const screenAspect = width / height;
+      const { width: vw, height: vh } = this.getVideoSize();
+      const videoAspect = vw / vh;
+      if (!Number.isFinite(videoAspect) || videoAspect <= 0) {
+        return;
+      }
+      if (screenAspect > videoAspect) {
+        // Screen wider than the frame: use the full width, crop top/bottom.
+        const repeatY = videoAspect / screenAspect;
+        this.videoTexture.repeat.set(1, repeatY);
+        this.videoTexture.offset.set(0, (1 - repeatY) / 2);
+      } else {
+        // Screen taller than the frame: use the full height, crop the sides.
+        const repeatX = screenAspect / videoAspect;
+        this.videoTexture.repeat.set(repeatX, 1);
+        this.videoTexture.offset.set((1 - repeatX) / 2, 0);
+      }
+    } catch {
+      // Ignore: the background simply keeps its previous fit.
+    }
+  }
+
+  /** Tear down the background quad and its texture. Idempotent. */
+  private disposeVideoBackground(): void {
+    try {
+      if (this.bgMesh) {
+        this.bgScene?.remove(this.bgMesh);
+        const geometry = this.bgMesh.geometry;
+        if (geometry && typeof geometry.dispose === 'function') {
+          geometry.dispose();
+        }
+        const material = this.bgMesh.material;
+        const materials = Array.isArray(material) ? material : [material];
+        for (const m of materials) {
+          if (m && typeof m.dispose === 'function') {
+            m.dispose();
+          }
+        }
+      }
+      if (this.videoTexture) {
+        this.videoTexture.dispose();
+      }
+    } catch {
+      // Teardown is best effort.
+    }
+    this.bgMesh = null;
+    this.videoTexture = null;
+    this.videoWidth = 0;
+    this.videoHeight = 0;
   }
 
   /**
@@ -440,17 +668,8 @@ export class App {
 
     this.cameraSource.stop();
 
-    // Remove video mesh
-    if (this.videoMesh) {
-      this.scene.remove(this.videoMesh);
-      this.videoMesh = null;
-    }
-
-    // Dispose video texture
-    if (this.videoTexture) {
-      this.videoTexture.dispose();
-      this.videoTexture = null;
-    }
+    // Remove the camera-feed background and its texture.
+    this.disposeVideoBackground();
 
     // Hide overlays
     this.setOverlaysVisible(false);
@@ -485,6 +704,13 @@ export class App {
     // Update video texture if available
     if (this.videoTexture) {
       this.videoTexture.needsUpdate = true;
+      try {
+        if (this.cameraSource.isStreaming()) {
+          this.refreshVideoSize(this.cameraSource.getVideoElement());
+        }
+      } catch {
+        // Keep the last known stream size.
+      }
     }
 
     try {
@@ -501,7 +727,24 @@ export class App {
       // Swallow per-frame errors to keep the loop alive.
     }
 
-    this.renderer.render(this.scene, this.camera);
+    this.renderFrame();
+  }
+
+  /**
+   * Two-pass render: camera feed in screen space, then the AR scene on top
+   * with a cleared depth buffer so the feed never occludes the coin.
+   */
+  private renderFrame(): void {
+    try {
+      this.renderer.clear();
+      if (this.bgScene !== null && this.bgCamera !== null && this.bgMesh !== null) {
+        this.renderer.render(this.bgScene, this.bgCamera);
+        this.renderer.clearDepth();
+      }
+      this.renderer.render(this.scene, this.camera);
+    } catch {
+      // A failed frame must not kill the loop.
+    }
   }
 
   private applyPoseToCamera(pose: CameraPose): void {
@@ -574,31 +817,23 @@ export class App {
    * Handle window resize / orientation change.
    */
   private onResize(): void {
-    const width = window.innerWidth;
-    const height = window.innerHeight;
-
-    this.camera.aspect = width / height;
-    this.camera.updateProjectionMatrix();
-
-    this.renderer.setSize(width, height);
-
-    // Adjust video mesh aspect ratio to match camera (portrait)
-    if (this.videoMesh && this.cameraSource.isStreaming()) {
-      const video = this.cameraSource.getVideoElement();
-      const videoAspect = video.videoWidth / video.videoHeight;
-      const meshAspect = 9 / 16; // Portrait aspect ratio
-
-      if (videoAspect > 0) {
-        // For portrait video, we want the mesh to maintain 9:16 ratio
-        this.videoMesh.scale.set(meshAspect / videoAspect, 1, 1);
-      }
+    try {
+      this.renderer.setSize(window.innerWidth, window.innerHeight);
+    } catch {
+      // Ignore: the projection update below still keeps the view sane.
     }
+    this.updateCameraProjection();
+    this.updateBackgroundFit();
   }
 
   /**
    * Clean up all resources
    */
   destroy(): void {
+    if (this.orientationResizeTimer !== null) {
+      clearTimeout(this.orientationResizeTimer);
+      this.orientationResizeTimer = null;
+    }
     window.removeEventListener('resize', this.handleResize);
     window.removeEventListener('orientationchange', this.handleOrientationChange);
     document.removeEventListener('visibilitychange', this.handleVisibilityChange);

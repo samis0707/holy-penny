@@ -3,11 +3,8 @@ name: Deploy to GitHub Pages
 on:
   push:
     branches:
-      - main
-      - feature/**
-  delete:
-    branches:
-      - feature/**
+      - '**'
+  workflow_dispatch:
 
 concurrency:
   group: github-pages-deployment
@@ -20,74 +17,39 @@ jobs:
       contents: read
       pages: write
       id-token: write
-    
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
-      
+
       - name: Install dependencies
         run: npm ci
-      
-      - name: Get branch name
-        id: branch
-        run: |
-          BRANCH_NAME=${{ github.ref_name }}
-          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
-          
-          # Sanitize branch name for URL (remove special characters)
-          SANITIZED_BRANCH=$(echo "$BRANCH_NAME" | sed 's/[^a-zA-Z0-9-]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//')
-          echo "sanitized_branch=$SANITIZED_BRANCH" >> $GITHUB_OUTPUT
-          
-          # Determine base path
-          if [ "$BRANCH_NAME" = "main" ]; then
-            BASE_PATH="/holy-penny/"
-            OUTPUT_DIR="."
-          else
-            BASE_PATH="/holy-penny/preview/$SANITIZED_BRANCH/"
-            OUTPUT_DIR="preview/$SANITIZED_BRANCH"
-          fi
-          
-          echo "base_path=$BASE_PATH" >> $GITHUB_OUTPUT
-          echo "output_dir=$OUTPUT_DIR" >> $GITHUB_OUTPUT
-      
+
       - name: Build project
         env:
-          BASE_PATH: ${{ steps.branch.outputs.base_path }}
-        run: |
-          npm run build -- --base=$BASE_PATH
-      
+          # Every branch deploys straight to production, so the base path is
+          # always the site root. No preview sub-paths.
+          BASE_PATH: /holy-penny/
+        run: npm run build -- --base=$BASE_PATH
+
       - name: Setup Pages
         uses: actions/configure-pages@v4
-        if: github.ref_name == 'main'
-      
-      - name: Upload to GitHub Pages (main)
-        if: github.ref_name == 'main'
+
+      - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: dist
-      
-      - name: Upload to GitHub Pages (feature)
-        if: github.ref_name != 'main'
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist
-          retention-days: 1
-      
+
       - name: Deploy to GitHub Pages
+        id: deployment
         uses: actions/deploy-pages@v4
-        if: github.event_name != 'delete'
-      
-      - name: Remove old feature deployment
-        if: github.event_name == 'delete' && startsWith(github.ref, 'refs/heads/feature/')
-        run: |
-          # This step would need additional logic to remove old deployments
-          # For now, we rely on GitHub's automatic cleanup
-          echo "Feature branch deleted - old deployment will be cleaned up"

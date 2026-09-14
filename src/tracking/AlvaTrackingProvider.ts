@@ -1,3 +1,15 @@
+/**
+ * AlvaTrackingProvider - PLACEHOLDER, not wired into the app.
+ *
+ * AlvaAR (visual SLAM) is still the goal for 6DoF tracking, but the toolkit
+ * is not available as a dependency yet, so this provider reports a STATIC
+ * identity pose: the camera never moves and the coin never gets closer.
+ * That fake pose is exactly why the app felt like it had no tracking.
+ *
+ * The app uses `DeviceTrackingProvider` (real gyro/accelerometer tracking)
+ * instead. Keep this file as the seam for the real SLAM implementation, but
+ * do not use it as the app's provider until it actually produces poses.
+ */
 import type {
   CameraPose,
   TrackingState,
