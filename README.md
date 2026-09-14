@@ -163,10 +163,15 @@ new App({ cameraFovDeg: 70 });
 
 ## Deployment
 
-The project is automatically deployed to GitHub Pages on every push:
+Every push, on any branch, is built and deployed straight to production:
 
-- **Main branch**: `https://samis0707.github.io/holy-penny/`
-- **Feature branches**: `https://samis0707.github.io/holy-penny/preview/<branch-name>/`
+`https://samis0707.github.io/holy-penny/`
+
+There are no preview deployments - the site always shows whatever was pushed
+last, from whichever branch. If a non-default branch fails to deploy with
+"Branch is not allowed to deploy to github-pages due to environment protection
+rules", allow it under **Settings -> Environments -> github-pages ->
+Deployment branches**.
 
 ## Git Workflow
 
