@@ -30,7 +30,16 @@ npm install
 npm run dev
 ```
 
-Opens the development server at `http://localhost:3000`
+Opens the development server at `http://localhost:3000` and listens on the LAN
+so a phone can reach it.
+
+The camera and the motion sensors both require a **secure context**. `localhost`
+counts as secure, but an IP address such as `https://192.168.x.x:3000` does not
+unless the server serves HTTPS. Drop a certificate pair next to `package.json`
+as `localhost-key.pem` / `localhost-cert.pem` (for example with
+[mkcert](https://github.com/FiloSottile/mkcert)) and the dev server picks it up
+automatically. Without those files it falls back to plain HTTP instead of
+failing to start.
 
 ### Build
 
@@ -83,7 +92,9 @@ Formats all TypeScript files using Prettier.
 │   │   └── App.ts
 │   ├── tracking/             # AR tracking providers
 │   │   ├── TrackingProvider.ts
-│   │   └── AlvaTrackingProvider.ts
+│   │   ├── CameraSource.ts
+│   │   ├── DeviceTrackingProvider.ts   # active provider (device sensors)
+│   │   └── AlvaTrackingProvider.ts     # placeholder, not wired up
 │   ├── rendering/            # Rendering components
 │   │   ├── Renderer.ts
 │   │   ├── Scene.ts
@@ -114,8 +125,41 @@ Formats all TypeScript files using Prettier.
 - **Language**: TypeScript
 - **Build Tool**: Vite
 - **3D Rendering**: Three.js
-- **AR Tracking**: AlvaAR (planned)
+- **AR Tracking**: device sensors (gyroscope/accelerometer); AlvaAR SLAM still planned
 - **Hosting**: GitHub Pages
+
+## AR Tracking
+
+`DeviceTrackingProvider` is the live provider. It uses the device's own
+sensors, so the pose is real:
+
+- **Orientation (3DoF)** from `deviceorientationabsolute` / `deviceorientation`,
+  converted to a Three.js camera quaternion with the screen-orientation angle
+  applied, so the coin stays put in the room while you look around.
+- **Translation** from `devicemotion`: steps are detected as peaks in the
+  accelerometer magnitude and move the player forward along the current
+  heading (0.7 m per step by default). That is what lets you walk up to the
+  coin and collect it.
+
+On iOS 13+ both sensors need `requestPermission()`, which only works from a
+user gesture — hence the START AR button. If orientation access is refused or
+the device has no sensors, the app says so instead of pretending to track;
+refused *motion* access is non-fatal and degrades to look-around-only.
+
+`AlvaTrackingProvider` remains as the seam for real visual SLAM, but it is a
+placeholder that reports a static identity pose and is not wired into the app.
+
+### Camera field of view
+
+The camera feed is drawn as a screen-space background pass that always fills
+the viewport ("cover" fit, cropped rather than letterboxed), and the virtual
+camera's FOV is derived from the stream size, the screen size, and the
+physical camera's long-side FOV (65° by default) so the 3D overlay lines up
+with the real world. Override it per device with:
+
+```ts
+new App({ cameraFovDeg: 70 });
+```
 
 ## Deployment
 
