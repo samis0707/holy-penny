@@ -168,10 +168,14 @@ Every push, on any branch, is built and deployed straight to production:
 `https://samis0707.github.io/holy-penny/`
 
 There are no preview deployments - the site always shows whatever was pushed
-last, from whichever branch. If a non-default branch fails to deploy with
-"Branch is not allowed to deploy to github-pages due to environment protection
-rules", allow it under **Settings -> Environments -> github-pages ->
-Deployment branches**.
+last, from whichever branch.
+
+The deploy job deliberately does not declare the `github-pages` environment:
+doing so makes GitHub apply that environment's deployment-branch rule, which
+here allows only the default branch, and every other branch is then rejected
+before the job starts. To use the environment anyway (it surfaces the deployed
+URL on the run), allow all branches under **Settings -> Environments ->
+github-pages -> Deployment branches** first.
 
 ## Git Workflow
 

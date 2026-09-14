@@ -18,10 +18,6 @@ jobs:
       pages: write
       id-token: write
 
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -50,6 +46,16 @@ jobs:
         with:
           path: dist
 
+      # No `environment:` block on this job, matching the workflow as it
+      # originally stood. Declaring the github-pages environment makes GitHub
+      # evaluate that environment's deployment-branch rule before the job
+      # starts, and this repo's rule allows only the default branch - the job
+      # is then rejected outright. If you would rather have the environment
+      # (it surfaces the deployed URL in the run), add it back here and allow
+      # all branches under Settings -> Environments -> github-pages.
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+      - name: Report deployed URL
+        run: echo "Deployed to ${{ steps.deployment.outputs.page_url }}"
