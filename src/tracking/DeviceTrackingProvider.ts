@@ -333,10 +333,8 @@ export class DeviceTrackingProvider implements TrackingProvider {
       if (this.state === 'STOPPED') {
         return;
       }
-      if (absolute) {
-        this.sawAbsolute = true;
-      } else if (this.sawAbsolute) {
-        // prefer absolute samples once the device has proven it emits them
+      if (!absolute && this.sawAbsolute) {
+        // prefer absolute samples once the device has proven it emits usable ones
         return;
       }
       const alpha = readNumber(event, 'alpha');
@@ -344,6 +342,13 @@ export class DeviceTrackingProvider implements TrackingProvider {
       const gamma = readNumber(event, 'gamma');
       if (alpha === null && beta === null && gamma === null) {
         return;
+      }
+      if (absolute) {
+        // Latch only on a USABLE absolute sample: Chromium fires exactly one
+        // all-null `deviceorientationabsolute` on subscribe, and latching on
+        // that would discard every relative sample forever - tracking would
+        // never reach ACTIVE.
+        this.sawAbsolute = true;
       }
       const now = Date.now();
       this.quaternion = orientationToQuaternion(

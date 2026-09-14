@@ -175,6 +175,24 @@ describe('DeviceTrackingProvider', () => {
     p.stop();
   });
 
+  it('does not latch on an all-null absolute sample (Chromium fires one on subscribe)', async () => {
+    const win = new FakeWindow();
+    const p = new DeviceTrackingProvider({ window: win });
+    await p.start();
+
+    // Chromium emits exactly one absolute event with null angles as soon as
+    // the page subscribes. Latching on it used to discard every later
+    // relative sample, so tracking could never reach ACTIVE.
+    win.dispatch('deviceorientationabsolute', { alpha: null, beta: null, gamma: null });
+    expect(p.getState()).toBe('INITIALIZING');
+    expect(p.getPose()).toBeNull();
+
+    win.dispatch('deviceorientation', orientationEvent(0, 90, 0));
+    expect(p.getState()).toBe('ACTIVE');
+    expect(p.getPose()).not.toBeNull();
+    p.stop();
+  });
+
   it('ignores orientation samples with no usable angles', async () => {
     const win = new FakeWindow();
     const p = new DeviceTrackingProvider({ window: win });

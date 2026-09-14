@@ -42,6 +42,21 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+/**
+ * True for a real three.js resource (geometry/material), false for the bare
+ * `jest.fn()` mock in `src/setupTests.ts`, where `new THREE.CylinderGeometry()`
+ * yields an empty instance with nothing on its prototype.
+ *
+ * DO NOT "simplify" this to `'position' in geometry`: a real `BufferGeometry`
+ * has NO `position` property (the vertex data lives at `attributes.position`),
+ * so that check is false in every real browser and the beam is never built.
+ * `dispose()` is on the real `BufferGeometry`/`Material` prototypes and absent
+ * from the mock instance, which is exactly the distinction we need here.
+ */
+function isRealThreeResource(value: unknown): boolean {
+  return isObject(value) && typeof (value as { dispose?: unknown }).dispose === 'function';
+}
+
 export class Beacon {
   private readonly scene: SceneLike | null;
   private readonly height: number;
@@ -169,7 +184,7 @@ export class Beacon {
         1,
         true
       );
-      if (!isObject(geometry) || !('position' in geometry)) {
+      if (!isRealThreeResource(geometry)) {
         return null;
       }
       const material = new THREE.MeshBasicMaterial({
