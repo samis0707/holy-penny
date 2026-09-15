@@ -65,9 +65,11 @@ const DEFAULT_LOST_TIMEOUT_MS = 1500;
  * holding the phone up to actually watch the AR screen while walking damps
  * the signal a lot more, and often never crossed that bar at all - which is
  * why steps could go undetected end to end. Lowered to be sensitive to a
- * gentler, "phone held steady" walking style.
+ * gentler, "phone held steady" walking style, with real margin (not a
+ * hairline pass) verified against strides up to 5s long - see
+ * BASELINE_TIME_CONSTANT_SEC for why "strides up to 5s" matters here.
  */
-const DEFAULT_STEP_THRESHOLD = 0.8;
+const DEFAULT_STEP_THRESHOLD = 0.7;
 const DEFAULT_MIN_STEP_INTERVAL_MS = 250;
 /**
  * Time constant (seconds) for the baseline's exponential decay toward the
@@ -79,17 +81,20 @@ const DEFAULT_MIN_STEP_INTERVAL_MS = 250;
  * baseline's effective adaptation speed depend on the device's `devicemotion`
  * sampling rate, which is not something this code controls and which varies
  * hugely across real devices/browsers (commonly anywhere from ~15 Hz to
- * ~100+ Hz). At a high sampling rate, the SAME per-event fraction closes the
- * gap to a gradually-rising signal many more times within a single stride,
- * so a gentle, gradual footstep - a phone held steady rather than swinging -
- * could fail to ever cross `stepThreshold` above baseline, independent of
- * how low that threshold is set, purely because the device happened to
- * sample fast. A time-based decay makes the baseline's behaviour the same
- * regardless of sampling rate: 2 seconds is comfortably longer than any
- * single stride (typically well under 1s) so it cannot track a step's rise
- * or fall, while still correcting for genuine drift over several seconds.
+ * ~100+ Hz): at a high rate, the same per-event fraction closes the gap to a
+ * gradually-rising signal many more times within a single stride. A
+ * time-based decay fixes that dependency, but an earlier value here (2.0s)
+ * turned out to still be too short: verified headlessly, a gentle stride's
+ * rise alone can take 1.2-1.5s in practice (nowhere near the ~0.18s a naive
+ * "11 samples at 60 Hz" estimate would suggest - each simulated sample
+ * incurs its own dispatch latency, and a cautious real walker watching the
+ * screen isn't necessarily fast either), which is a large enough fraction of
+ * a 2s time constant that the baseline still closed most of the gap to the
+ * peak. 6 seconds keeps genuine drift correction (over the course of a play
+ * session) while comfortably outlasting even a full 5-SECOND stride, with
+ * real margin verified at the threshold above, not a near-miss.
  */
-const BASELINE_TIME_CONSTANT_SEC = 2.0;
+const BASELINE_TIME_CONSTANT_SEC = 6.0;
 const FPS_WINDOW_SAMPLES = 16;
 const MIN_LOST_TICK_MS = 100;
 const DEG_TO_RAD = Math.PI / 180;

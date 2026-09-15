@@ -375,10 +375,10 @@ describe('DeviceTrackingProvider', () => {
     // device's devicemotion sampling rate - a fast-sampling device (higher
     // rateHz below) spreads the SAME gradual rise over more samples, giving
     // a per-event-fraction baseline many more chances to chase it up before
-    // the threshold is crossed. 60 Hz over a slow, 1.3s stride is close to
-    // the worst case for that failure mode; a fix that only special-cased
-    // the sample count used by an earlier, weaker version of this test
-    // would not survive this one.
+    // the threshold is crossed. 60 Hz over a slow, 5s stride
+    // (samplesPerHalf=150) sits at the edge of what was validated
+    // numerically as reliably detectable; a fix that only special-cased a
+    // shorter duration would not survive this one.
     const win = new FakeWindow();
     // Starts well past 0 so it never collides with lastStepTime's initial
     // (unset) value of 0, which would falsely debounce the very first step.
@@ -390,13 +390,56 @@ describe('DeviceTrackingProvider', () => {
     win.dispatch('devicemotion', motionEvent(9.8)); // seed the baseline
 
     const clock: FakeClock = { ms: 10_000 };
-    const gaitOpts = { peakAbove: 1.0, troughBelow: 0.35, samplesPerHalf: 39, rateHz: 60 };
+    const gaitOpts = { peakAbove: 1.0, troughBelow: 0.35, samplesPerHalf: 150, rateHz: 60 };
     dispatchGaitStep(win, now, clock, gaitOpts);
     expect(p.getStepCount()).toBe(1);
 
     // A little real-world variance (a brisker second stride) shouldn't matter.
     dispatchGaitStep(win, now, clock, { ...gaitOpts, samplesPerHalf: 20, rateHz: 90 });
     expect(p.getStepCount()).toBe(2);
+    p.stop();
+  });
+
+  it('detects a step even when spread across the exact irregular real-world dispatch gaps measured headlessly', async () => {
+    // A headless browser run driving this exact rise/fall shape
+    // sample-by-sample (via real dispatch calls, not a mocked clock)
+    // measured actual per-sample gaps averaging ~128ms - not the ~16ms a
+    // naive "60 Hz" estimate would suggest - stretching an 11-sample
+    // half-sine rise to roughly 1.2-1.5s of real elapsed time. At the
+    // BASELINE_TIME_CONSTANT_SEC in effect then (2.0s) that was long enough,
+    // relative to the time constant, for the baseline to close most of the
+    // gap: the live margin above threshold peaked at ~0.734, just short of
+    // the 0.8 threshold also in effect then, so the step silently never
+    // registered - a real, reproduced failure, not a synthetic worst case.
+    // This test replays those exact measured gaps (ms, rise then fall) to
+    // guard against exactly that regression, not an idealized approximation
+    // of it.
+    const win = new FakeWindow();
+    const now = jest.spyOn(Date, 'now');
+    now.mockReturnValue(10_000);
+    const p = new DeviceTrackingProvider({ window: win });
+    await p.start();
+    win.dispatch('deviceorientation', orientationEvent(0, 90, 0));
+    win.dispatch('devicemotion', motionEvent(9.8)); // seed the baseline
+
+    const measuredGapsMs = [116, 114, 170, 197, 119, 100, 186, 81, 105, 116, 101];
+    const samples = 11;
+    let t = 10_000;
+    for (let i = 0; i < samples; i += 1) {
+      const frac = i / (samples - 1);
+      const s = Math.sin((frac * Math.PI) / 2);
+      win.dispatch('devicemotion', motionEvent(9.8 + s * 1.0));
+      t += measuredGapsMs[i];
+      now.mockReturnValue(t);
+    }
+    for (let i = 0; i < samples; i += 1) {
+      const frac = i / (samples - 1);
+      const s = Math.sin((frac * Math.PI) / 2);
+      win.dispatch('devicemotion', motionEvent(9.8 - s * 0.35));
+      t += measuredGapsMs[i];
+      now.mockReturnValue(t);
+    }
+    expect(p.getStepCount()).toBe(1);
     p.stop();
   });
 
