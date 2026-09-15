@@ -3,7 +3,7 @@
  * tracking/game/coin/... collaborators and jsdom DOM only.
  */
 
-import { App } from './App';
+import { App, horizontalFovToVerticalFovDeg } from './App';
 import type { AppOptions } from './App';
 import type { CameraPose } from '../tracking/TrackingProvider';
 
@@ -283,5 +283,62 @@ describe('App wiring', () => {
     expect(fakes.hud.destroy).toHaveBeenCalled();
     expect(fakes.status.destroy).toHaveBeenCalled();
     expect(app.isRunning()).toBe(false);
+  });
+});
+
+describe('horizontalFovToVerticalFovDeg', () => {
+  /** Round-trip: three.js derives horizontal back out as 2*atan(tan(v/2)*aspect). */
+  function verticalBackToHorizontalDeg(verticalDeg: number, aspect: number): number {
+    return (2 * Math.atan(Math.tan((verticalDeg * Math.PI) / 360) * aspect) * 180) / Math.PI;
+  }
+
+  it('round-trips a typical portrait phone aspect back to the requested horizontal FOV', () => {
+    const portraitAspect = 390 / 844;
+    const vertical = horizontalFovToVerticalFovDeg(100, portraitAspect);
+    expect(verticalBackToHorizontalDeg(vertical, portraitAspect)).toBeCloseTo(100, 5);
+  });
+
+  it('does not collapse to the old ~30 deg tunnel-vision horizontal FOV on a portrait screen', () => {
+    // Regression: the previous "long side of the sensor" model rendered
+    // only ~33 deg horizontal on a typical portrait phone. The new model
+    // must deliver something clearly wider than that.
+    const portraitAspect = 390 / 844;
+    const vertical = horizontalFovToVerticalFovDeg(100, portraitAspect);
+    const effectiveHorizontal = verticalBackToHorizontalDeg(vertical, portraitAspect);
+    expect(effectiveHorizontal).toBeGreaterThan(80);
+  });
+
+  it('round-trips a landscape aspect too', () => {
+    const landscapeAspect = 844 / 390;
+    const vertical = horizontalFovToVerticalFovDeg(100, landscapeAspect);
+    expect(verticalBackToHorizontalDeg(vertical, landscapeAspect)).toBeCloseTo(100, 5);
+  });
+
+  it('clamps the horizontal input to a sane range', () => {
+    expect(horizontalFovToVerticalFovDeg(5, 1)).toEqual(horizontalFovToVerticalFovDeg(40, 1));
+    expect(horizontalFovToVerticalFovDeg(500, 1)).toEqual(horizontalFovToVerticalFovDeg(150, 1));
+  });
+
+  it('falls back to the default for a non-finite horizontal input', () => {
+    expect(horizontalFovToVerticalFovDeg(Number.NaN, 1)).toEqual(
+      horizontalFovToVerticalFovDeg(100, 1)
+    );
+  });
+
+  it('falls back to aspect 1 for a non-finite or non-positive aspect, never throwing', () => {
+    expect(() => horizontalFovToVerticalFovDeg(100, Number.NaN)).not.toThrow();
+    expect(() => horizontalFovToVerticalFovDeg(100, 0)).not.toThrow();
+    expect(() => horizontalFovToVerticalFovDeg(100, -1)).not.toThrow();
+    expect(horizontalFovToVerticalFovDeg(100, Number.NaN)).toEqual(
+      horizontalFovToVerticalFovDeg(100, 1)
+    );
+  });
+
+  it('clamps the derived vertical FOV well short of the 180 deg degenerate limit', () => {
+    // An extremely narrow aspect ratio would otherwise blow the vertical
+    // FOV up toward (or past) 180 deg, where tan() diverges.
+    const vertical = horizontalFovToVerticalFovDeg(150, 0.01);
+    expect(vertical).toBeLessThan(180);
+    expect(Number.isFinite(vertical)).toBe(true);
   });
 });

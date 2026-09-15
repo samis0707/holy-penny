@@ -72,7 +72,15 @@ export interface GameOptions {
   totalCoins?: number;
 }
 
-const DEFAULT_THRESHOLD = 0.6;
+/**
+ * Collection radius. Generous on purpose: position tracking here is pure
+ * dead-reckoning from a fixed assumed step length (see
+ * `DeviceTrackingProvider`'s `stepLengthMeters`), not a real measurement of
+ * how far the player actually walked, so a tight radius means small,
+ * unavoidable mismatches between assumed and real stride length can leave
+ * the coin permanently just out of reach.
+ */
+const DEFAULT_THRESHOLD = 1.0;
 const DEFAULT_SPAWN_DISTANCE = 2.5;
 const DEFAULT_TOTAL = 1;
 

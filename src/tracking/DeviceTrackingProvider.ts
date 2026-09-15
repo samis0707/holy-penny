@@ -59,9 +59,30 @@ export interface DeviceTrackingOptions {
 
 const DEFAULT_STEP_LENGTH_M = 0.7;
 const DEFAULT_LOST_TIMEOUT_MS = 1500;
-const DEFAULT_STEP_THRESHOLD = 1.6;
-const DEFAULT_MIN_STEP_INTERVAL_MS = 280;
-const BASELINE_SMOOTHING = 0.1;
+/**
+ * m/s^2 above the smoothed baseline that counts as a step's peak. 1.6 (the
+ * original value) assumed a fairly energetic pocket-swing gait; someone
+ * holding the phone up to actually watch the AR screen while walking damps
+ * the signal a lot more, and often never crossed that bar at all - which is
+ * why steps could go undetected end to end. Lowered to be sensitive to a
+ * gentler, "phone held steady" walking style.
+ */
+const DEFAULT_STEP_THRESHOLD = 0.8;
+const DEFAULT_MIN_STEP_INTERVAL_MS = 250;
+/**
+ * Exponential smoothing factor for the baseline (fraction of the gap to the
+ * current reading it closes per sample). 0.1 (the original value) adapts
+ * within roughly one stride's worth of samples, which sounds fine but is
+ * actually the problem: it lets the baseline CHASE a gradual rise during the
+ * ascent itself, closing the gap to the peak before `magnitude > baseline +
+ * stepThreshold` is ever true - a footstep spread smoothly over many
+ * samples (again, a phone held steady rather than swinging) could fail to
+ * cross the threshold at all, independent of how low `stepThreshold` is set.
+ * 0.05 makes the baseline slow enough that it cannot meaningfully track
+ * anything on the timescale of a single stride, while still correcting for
+ * genuine slow drift over many seconds.
+ */
+const BASELINE_SMOOTHING = 0.05;
 const FPS_WINDOW_SAMPLES = 16;
 const MIN_LOST_TICK_MS = 100;
 const DEG_TO_RAD = Math.PI / 180;
@@ -423,7 +444,14 @@ export class DeviceTrackingProvider implements TrackingProvider {
           this.registerStep();
         }
       }
-      this.baseline += (magnitude - this.baseline) * BASELINE_SMOOTHING;
+      // Freeze the baseline while a step's peak is still in progress. A
+      // broad or slowly-decaying peak (typical of a phone held steadily
+      // rather than swinging in a pocket) would otherwise pull the running
+      // baseline up to meet the elevated reading before the valley crossing
+      // below it ever fires, silently swallowing the step.
+      if (!this.peaked) {
+        this.baseline += (magnitude - this.baseline) * BASELINE_SMOOTHING;
+      }
     } catch {
       // never throw out of a sensor callback
     }

@@ -304,14 +304,14 @@ describe('Game', () => {
     expect(ctx.soundCalls.length).toBe(1);
   });
 
-  it('stays PLAYING when at 0.61m (beyond default 0.6 threshold)', async () => {
+  it('stays PLAYING when at 1.01m (beyond default 1.0m threshold)', async () => {
     const ctx = setup({ withWorld: false });
     await startAndPlay(ctx, 0, 0, 0);
     const coinPos = ctx.coin.getPosition();
     if (coinPos === null) {
       throw new Error('coin not placed');
     }
-    ctx.tracking.setPose(makePose(coinPos.x + 0.61, coinPos.y, coinPos.z, 2000));
+    ctx.tracking.setPose(makePose(coinPos.x + 1.01, coinPos.y, coinPos.z, 2000));
     ctx.game.update();
     expect(ctx.game.getState()).toBe('PLAYING');
     expect(ctx.game.getScore()).toBe(0);
@@ -368,15 +368,15 @@ describe('Game', () => {
     expect(game.getState()).toBe('LOADING');
   });
 
-  it('clamps threshold <=0 to 0.6 behavior', async () => {
+  it('clamps threshold <=0 to the 1.0m default behavior', async () => {
     const ctx = setup({ withWorld: false, threshold: 0 });
     await startAndPlay(ctx, 0, 0, 0);
     const coinPos = ctx.coin.getPosition();
     if (coinPos === null) {
       throw new Error('coin not placed');
     }
-    // With clamped 0.6, 0.5m collects.
-    ctx.tracking.setPose(makePose(coinPos.x + 0.5, coinPos.y, coinPos.z, 2000));
+    // With the clamped 1.0m default, 0.9m collects.
+    ctx.tracking.setPose(makePose(coinPos.x + 0.9, coinPos.y, coinPos.z, 2000));
     ctx.game.update();
     expect(ctx.game.getState()).toBe('FINISHED');
     expect(ctx.game.getScore()).toBe(1);

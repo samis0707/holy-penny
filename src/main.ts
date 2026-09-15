@@ -17,9 +17,10 @@ function isJestEnv(): boolean {
 }
 
 /**
- * `?fov=70` overrides the assumed long-side field of view of the phone
- * camera. Lens FOV differs per device and can only be judged by holding the
- * phone up, so it is tunable without a rebuild.
+ * `?fov=110` overrides the horizontal field of view the AR scene renders
+ * with (default 100, clamped to 40-150 - see `App`'s `cameraFovDeg`).
+ * Tunable without a rebuild since "does this feel wide enough" can only be
+ * judged by holding the phone up.
  */
 export function readOptionsFromLocation(search: string): AppOptions {
   try {

@@ -139,7 +139,14 @@ sensors, so the pose is real:
 - **Translation** from `devicemotion`: steps are detected as peaks in the
   accelerometer magnitude and move the player forward along the current
   heading (0.7 m per step by default). That is what lets you walk up to the
-  coin and collect it.
+  coin and collect it. The detector is tuned for a phone held steadily to
+  watch the screen (a soft, gradual signal), not just a sharp pocket-swing
+  gait: the baseline it compares against adapts slowly (`BASELINE_SMOOTHING`)
+  so it cannot chase a gradual rise or a lingering plateau and silently
+  swallow the step, which is what made the coin feel uncollectable.
+  Collection itself has a generous 1.0 m radius (`Game`'s
+  `collectThreshold`), since the tracked position is pure dead reckoning
+  from an assumed step length, not a measurement of real distance walked.
 
 On iOS 13+ both sensors need `requestPermission()`, which only works from a
 user gesture — hence the START AR button. `App.startAR()` requests tracking
@@ -159,14 +166,25 @@ placeholder that reports a static identity pose and is not wired into the app.
 ### Camera field of view
 
 The camera feed is drawn as a screen-space background pass that always fills
-the viewport ("cover" fit, cropped rather than letterboxed), and the virtual
-camera's FOV is derived from the stream size, the screen size, and the
-physical camera's long-side FOV (65° by default) so the 3D overlay lines up
-with the real world. Override it per device with:
+the viewport ("cover" fit, cropped rather than letterboxed).
+
+The 3D camera's field of view is a directly-tunable **horizontal** target
+(100° by default), converted to the vertical FOV Three.js actually wants
+using the standard rectilinear formula for the current screen aspect ratio.
+It is deliberately **not** derived from the physical camera's sensor spec:
+an earlier version did that, and on a portrait phone screen the "physically
+correct" number collapses to roughly 30° horizontal - a tunnel-vision view
+that feels much smaller than what you'd naturally expect from an AR app.
+There is no real visual SLAM here to keep pixel-perfectly aligned with
+anyway (see the tracking section below), so a comfortably wide, directly
+tunable FOV serves the game better than a "physically accurate" one derived
+from a guessed sensor spec. Override it with:
 
 ```ts
-new App({ cameraFovDeg: 70 });
+new App({ cameraFovDeg: 110 }); // wider
 ```
+
+or, without a rebuild, `?fov=110` on the URL. Valid range is 40-150°.
 
 ## Deployment
 

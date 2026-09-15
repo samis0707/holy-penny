@@ -90,7 +90,7 @@ export interface AppGame {
 
 export interface AppOptions {
   canvas?: HTMLCanvasElement;
-  /** Long-side field of view of the physical camera, in degrees. */
+  /** Horizontal field of view to render with, in degrees. */
   cameraFovDeg?: number;
   cameraOptions?: ConstructorParameters<typeof CameraSource>[0];
   cameraSource?: AppCameraSource;
@@ -107,24 +107,63 @@ export interface AppOptions {
 }
 
 /**
- * Field of view of the physical camera along the LONG side of its frame.
- * ~65 deg matches the main rear camera of current phones; the vertical FOV
- * actually used for rendering is derived from this plus the video and
- * screen aspect ratios (see App.updateCameraProjection).
+ * Horizontal field of view target, in degrees - the axis a player judges
+ * "wide" vs "narrow" by. Three.js's `PerspectiveCamera.fov` is the VERTICAL
+ * fov instead, so this is converted per frame with the current screen aspect
+ * ratio (see `horizontalFovToVerticalFovDeg`).
+ *
+ * Deliberately NOT derived from the physical camera's sensor FOV plus the
+ * video's own aspect ratio, which an earlier version did: that is more
+ * "physically accurate", but on a portrait phone screen it collapses to a
+ * very narrow horizontal FOV (about 30 deg for a typical ~65 deg sensor
+ * assumption) that feels like looking through a straw. There is no real
+ * visual SLAM here to keep pixel-perfectly aligned with anyway - tracking is
+ * sensor-based dead reckoning (see `DeviceTrackingProvider`), so a
+ * comfortably wide, directly-tunable FOV serves the game better than one
+ * derived from a guessed sensor spec. 100 deg reads as a clearly wide,
+ * "action-cam" field of view without tipping into fisheye distortion.
  */
-const DEFAULT_SENSOR_FOV_DEG = 65;
-const MIN_FOV_DEG = 30;
-const MAX_FOV_DEG = 120;
+const DEFAULT_HORIZONTAL_FOV_DEG = 100;
+const MIN_HORIZONTAL_FOV_DEG = 40;
+const MAX_HORIZONTAL_FOV_DEG = 150;
+
+/**
+ * Safety bounds on the actual (vertical) `camera.fov` value, independent of
+ * the horizontal target above: a narrow portrait aspect ratio pushes the
+ * derived vertical FOV well past the horizontal number (that is expected -
+ * see `horizontalFovToVerticalFovDeg`), and an extreme aspect ratio could
+ * push it toward the 180 deg degenerate limit where the projection breaks
+ * down. Clamped well short of that.
+ */
+const MIN_VERTICAL_FOV_DEG = 20;
+const MAX_VERTICAL_FOV_DEG = 170;
 
 /** Used until the stream reports its real dimensions. */
 const FALLBACK_VIDEO_WIDTH = 720;
 const FALLBACK_VIDEO_HEIGHT = 1280;
 
-function clampFov(deg: number): number {
+function clampHorizontalFovDeg(deg: number): number {
   if (!Number.isFinite(deg)) {
-    return DEFAULT_SENSOR_FOV_DEG;
+    return DEFAULT_HORIZONTAL_FOV_DEG;
   }
-  return Math.min(MAX_FOV_DEG, Math.max(MIN_FOV_DEG, deg));
+  return Math.min(MAX_HORIZONTAL_FOV_DEG, Math.max(MIN_HORIZONTAL_FOV_DEG, deg));
+}
+
+/**
+ * Convert a target HORIZONTAL field of view to the VERTICAL field of view
+ * `PerspectiveCamera.fov` expects, given `camera.aspect = width / height`.
+ * Standard rectilinear-lens conversion: `tan(h/2) = tan(v/2) * aspect`, so
+ * `tan(v/2) = tan(h/2) / aspect` - solved for v and clamped to a range the
+ * projection matrix stays sane at. Exported for unit testing: this file's
+ * WebGL-dependent paths are never exercised under Jest (see `isTestEnv`),
+ * so this pure conversion is the only way to cover the FOV math at all.
+ */
+export function horizontalFovToVerticalFovDeg(horizontalDeg: number, aspect: number): number {
+  const h = clampHorizontalFovDeg(horizontalDeg);
+  const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 1;
+  const verticalTan = Math.tan((h * Math.PI) / 360) / safeAspect;
+  const verticalDeg = (2 * Math.atan(verticalTan) * 180) / Math.PI;
+  return Math.min(MAX_VERTICAL_FOV_DEG, Math.max(MIN_VERTICAL_FOV_DEG, verticalDeg));
 }
 
 function isTestEnv(): boolean {
@@ -154,7 +193,7 @@ export class App {
   private bgMesh: THREE.Mesh | null = null;
   private videoWidth = 0;
   private videoHeight = 0;
-  private readonly sensorFovDeg: number;
+  private readonly horizontalFovDeg: number;
   private orientationResizeTimer: ReturnType<typeof setTimeout> | null = null;
 
   private tracking: TrackingProvider;
@@ -207,7 +246,9 @@ export class App {
   };
 
   constructor(options: AppOptions = {}) {
-    this.sensorFovDeg = clampFov(options.cameraFovDeg ?? DEFAULT_SENSOR_FOV_DEG);
+    this.horizontalFovDeg = clampHorizontalFovDeg(
+      options.cameraFovDeg ?? DEFAULT_HORIZONTAL_FOV_DEG
+    );
     this.cameraSource = options.cameraSource
       ? options.cameraSource
       : options.cameraOptions
@@ -281,10 +322,11 @@ export class App {
       this.scene = new THREE.Scene();
       this.scene.background = null;
 
-      // Camera. Starts at the tracking origin; the FOV is replaced by one
-      // derived from the real camera stream as soon as it reports its size.
+      // Camera. Starts at the tracking origin; the initial fov value here is
+      // a throwaway placeholder immediately overwritten by
+      // updateCameraProjection() below.
       const aspect = window.innerWidth / window.innerHeight;
-      this.camera = new THREE.PerspectiveCamera(DEFAULT_SENSOR_FOV_DEG, aspect, 0.05, 1000);
+      this.camera = new THREE.PerspectiveCamera(DEFAULT_HORIZONTAL_FOV_DEG, aspect, 0.05, 1000);
       this.camera.position.set(0, 0, 0);
 
       // Renderer. autoClear is off because every frame renders two passes:
@@ -355,7 +397,7 @@ export class App {
       },
     };
     const camera = {
-      fov: DEFAULT_SENSOR_FOV_DEG,
+      fov: DEFAULT_HORIZONTAL_FOV_DEG,
       aspect: 1,
       position,
       quaternion,
@@ -558,7 +600,10 @@ export class App {
 
   /**
    * Pick up the stream dimensions once they are known (they are 0 until the
-   * first frame decodes) and re-fit FOV + background when they change.
+   * first frame decodes) and re-fit the background crop when they change.
+   * The camera's FOV does not depend on the video's own dimensions (see
+   * `horizontalFovToVerticalFovDeg`), so only the background needs a re-fit
+   * here.
    */
   private refreshVideoSize(video: HTMLVideoElement): void {
     const w = video.videoWidth;
@@ -569,31 +614,21 @@ export class App {
     this.videoWidth = w;
     this.videoHeight = h;
     this.updateBackgroundFit();
-    this.updateCameraProjection();
   }
 
   /**
-   * Match the virtual camera's field of view to the physical one.
-   *
-   * `sensorFovDeg` describes the long side of the camera frame. The frame is
-   * then "cover"-fitted to the viewport, so whichever axis gets cropped is
-   * what the user actually sees - that visible part is the FOV we render
-   * with. Getting this wrong is what made the AR view feel zoomed in.
+   * Set the virtual camera's field of view for the current screen aspect.
+   * `horizontalFovDeg` is the fixed target; this derives the corresponding
+   * (aspect-dependent) vertical `camera.fov` from it every time the screen
+   * size or orientation changes.
    */
   private updateCameraProjection(): void {
     try {
       const width = window.innerWidth || 1;
       const height = window.innerHeight || 1;
       const screenAspect = width / height;
-      const { width: vw, height: vh } = this.getVideoSize();
 
-      const tanHalfLong = Math.tan((this.sensorFovDeg * Math.PI) / 360);
-      const shortOverLong = Math.min(vw, vh) / Math.max(vw, vh);
-      const tanHalfH = vw >= vh ? tanHalfLong : tanHalfLong * shortOverLong;
-      const tanHalfV = vh >= vw ? tanHalfLong : tanHalfLong * shortOverLong;
-
-      const visibleTanHalfV = Math.min(tanHalfV, tanHalfH / screenAspect);
-      this.camera.fov = clampFov((2 * Math.atan(visibleTanHalfV) * 180) / Math.PI);
+      this.camera.fov = horizontalFovToVerticalFovDeg(this.horizontalFovDeg, screenAspect);
       this.camera.aspect = screenAspect;
       this.camera.updateProjectionMatrix();
     } catch {

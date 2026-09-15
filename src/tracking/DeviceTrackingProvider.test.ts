@@ -60,6 +60,28 @@ function walkOneStep(win: FakeWindow): void {
   win.dispatch('devicemotion', motionEvent(9.8 - 5));
 }
 
+/**
+ * A smooth, gradual accelerometer magnitude bump: a half-sine rise to a
+ * modest peak followed by a half-sine dip to a modest trough, spread over
+ * many samples - the signature of a phone held steadily (to watch the AR
+ * screen) rather than swinging loosely, e.g. in a pocket. `walkOneStep`'s
+ * instant +5/-5 swing is nothing like this; a detector tuned only against
+ * sharp swings can fail completely against a gradual one.
+ */
+function gentleGaitCycle(restLevel: number, peakAbove: number, troughBelow: number): unknown[] {
+  const samples = 22;
+  const out: unknown[] = [];
+  for (let i = 1; i <= samples; i += 1) {
+    const t = i / samples;
+    const magnitude =
+      t <= 0.5
+        ? restLevel + Math.sin((t / 0.5) * Math.PI) * peakAbove
+        : restLevel - Math.sin(((t - 0.5) / 0.5) * Math.PI) * troughBelow;
+    out.push(motionEvent(magnitude));
+  }
+  return out;
+}
+
 describe('DeviceTrackingProvider', () => {
   afterEach(() => {
     jest.restoreAllMocks();
@@ -311,6 +333,55 @@ describe('DeviceTrackingProvider', () => {
     const pose = p.getPose();
     expect(pose?.position.x).toBeCloseTo(-1, 6);
     expect(pose?.position.z).toBeCloseTo(0, 6);
+    p.stop();
+  });
+
+  it('detects a gradual, gently-held-phone gait, not just a sharp swing', async () => {
+    // Regression test for two compounding bugs in step detection:
+    // (1) the baseline chasing the signal UP during a gradual ascent could
+    //     keep `magnitude > baseline + stepThreshold` from ever firing at
+    //     all, regardless of how low stepThreshold is set; (2) even once
+    //     peaked, a baseline that kept adapting during a lingering plateau
+    //     could prevent the valley crossing from ever resolving. Real
+    //     "watching the screen while walking" produces exactly this kind of
+    //     smooth, un-sharp signal - `walkOneStep`'s instant +5/-5 swing
+    //     would never have caught either bug.
+    const win = new FakeWindow();
+    // Starts well past 0 so it never collides with lastStepTime's initial
+    // (unset) value of 0, which would falsely debounce the very first step.
+    const now = jest.spyOn(Date, 'now');
+    now.mockReturnValue(10_000);
+    const p = new DeviceTrackingProvider({ window: win });
+    await p.start();
+    win.dispatch('deviceorientation', orientationEvent(0, 90, 0));
+    win.dispatch('devicemotion', motionEvent(9.8)); // seed the baseline
+
+    for (const sample of gentleGaitCycle(9.8, 1.0, 0.35)) {
+      win.dispatch('devicemotion', sample);
+    }
+    expect(p.getStepCount()).toBe(1);
+
+    // Past minStepIntervalMs, as a second real stride would be.
+    now.mockReturnValue(11_000);
+    for (const sample of gentleGaitCycle(9.8, 1.0, 0.35)) {
+      win.dispatch('devicemotion', sample);
+    }
+    expect(p.getStepCount()).toBe(2);
+    p.stop();
+  });
+
+  it('does not register a step from idle hand jitter while standing still', async () => {
+    const win = new FakeWindow();
+    const p = new DeviceTrackingProvider({ window: win });
+    await p.start();
+    win.dispatch('deviceorientation', orientationEvent(0, 90, 0));
+    win.dispatch('devicemotion', motionEvent(9.8));
+
+    for (let i = 0; i < 40; i += 1) {
+      const jitter = Math.sin(i * 1.3) * 0.35;
+      win.dispatch('devicemotion', motionEvent(9.8 + jitter));
+    }
+    expect(p.getStepCount()).toBe(0);
     p.stop();
   });
 
