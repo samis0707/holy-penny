@@ -68,18 +68,49 @@ function walkOneStep(win: FakeWindow): void {
  * instant +5/-5 swing is nothing like this; a detector tuned only against
  * sharp swings can fail completely against a gradual one.
  */
-function gentleGaitCycle(restLevel: number, peakAbove: number, troughBelow: number): unknown[] {
-  const samples = 22;
-  const out: unknown[] = [];
-  for (let i = 1; i <= samples; i += 1) {
-    const t = i / samples;
-    const magnitude =
-      t <= 0.5
-        ? restLevel + Math.sin((t / 0.5) * Math.PI) * peakAbove
-        : restLevel - Math.sin(((t - 0.5) / 0.5) * Math.PI) * troughBelow;
-    out.push(motionEvent(magnitude));
+/**
+ * A monotonic quarter-sine rise from rest to a peak, then a monotonic
+ * quarter-sine fall from rest down to a trough - a real footstep's
+ * accelerometer signature, spread over `samplesPerHalf` `devicemotion`
+ * events per half at `rateHz`. Dispatches through `win` and advances the
+ * injected `now` spy by the real per-sample interval between each event
+ * (baseline decay is time-based, not per-event, so this matters).
+ *
+ * NOTE: an earlier version of this helper used `sin((t/0.5)*PI)` for the
+ * "rise" half, which for t in [0, 0.5] is a FULL hump (0 -> peak -> back to
+ * rest) rather than a monotonic rise - i.e. two bumps per step instead of
+ * one, which gives the threshold/baseline logic an easier signal than a
+ * real footstep produces and can pass even against a broken detector. Do
+ * not reintroduce that shape.
+ */
+/** Mutable clock a test controls and `dispatchGaitStep` advances. */
+interface FakeClock {
+  ms: number;
+}
+
+function dispatchGaitStep(
+  win: FakeWindow,
+  now: { mockReturnValue: (v: number) => unknown },
+  clock: FakeClock,
+  opts: { peakAbove: number; troughBelow: number; samplesPerHalf: number; rateHz: number }
+): void {
+  const dtMs = 1000 / opts.rateHz;
+  const advance = (): void => {
+    clock.ms += dtMs;
+    now.mockReturnValue(clock.ms);
+  };
+  for (let i = 0; i < opts.samplesPerHalf; i += 1) {
+    const frac = i / (opts.samplesPerHalf - 1);
+    const s = Math.sin((frac * Math.PI) / 2);
+    win.dispatch('devicemotion', motionEvent(9.8 + s * opts.peakAbove));
+    advance();
   }
-  return out;
+  for (let i = 0; i < opts.samplesPerHalf; i += 1) {
+    const frac = i / (opts.samplesPerHalf - 1);
+    const s = Math.sin((frac * Math.PI) / 2);
+    win.dispatch('devicemotion', motionEvent(9.8 - s * opts.troughBelow));
+    advance();
+  }
 }
 
 describe('DeviceTrackingProvider', () => {
@@ -336,16 +367,18 @@ describe('DeviceTrackingProvider', () => {
     p.stop();
   });
 
-  it('detects a gradual, gently-held-phone gait, not just a sharp swing', async () => {
-    // Regression test for two compounding bugs in step detection:
-    // (1) the baseline chasing the signal UP during a gradual ascent could
-    //     keep `magnitude > baseline + stepThreshold` from ever firing at
-    //     all, regardless of how low stepThreshold is set; (2) even once
-    //     peaked, a baseline that kept adapting during a lingering plateau
-    //     could prevent the valley crossing from ever resolving. Real
-    //     "watching the screen while walking" produces exactly this kind of
-    //     smooth, un-sharp signal - `walkOneStep`'s instant +5/-5 swing
-    //     would never have caught either bug.
+  it('detects a gradual, gently-held-phone gait at a high sampling rate and slow stride', async () => {
+    // Regression test for a deeper version of the "gentle gait" bug than a
+    // fixed per-event smoothing fraction could ever pass reliably: the
+    // baseline's decay is now time-based (see BASELINE_TIME_CONSTANT_SEC),
+    // because a per-event fraction's effective speed depends on the
+    // device's devicemotion sampling rate - a fast-sampling device (higher
+    // rateHz below) spreads the SAME gradual rise over more samples, giving
+    // a per-event-fraction baseline many more chances to chase it up before
+    // the threshold is crossed. 60 Hz over a slow, 1.3s stride is close to
+    // the worst case for that failure mode; a fix that only special-cased
+    // the sample count used by an earlier, weaker version of this test
+    // would not survive this one.
     const win = new FakeWindow();
     // Starts well past 0 so it never collides with lastStepTime's initial
     // (unset) value of 0, which would falsely debounce the very first step.
@@ -356,30 +389,35 @@ describe('DeviceTrackingProvider', () => {
     win.dispatch('deviceorientation', orientationEvent(0, 90, 0));
     win.dispatch('devicemotion', motionEvent(9.8)); // seed the baseline
 
-    for (const sample of gentleGaitCycle(9.8, 1.0, 0.35)) {
-      win.dispatch('devicemotion', sample);
-    }
+    const clock: FakeClock = { ms: 10_000 };
+    const gaitOpts = { peakAbove: 1.0, troughBelow: 0.35, samplesPerHalf: 39, rateHz: 60 };
+    dispatchGaitStep(win, now, clock, gaitOpts);
     expect(p.getStepCount()).toBe(1);
 
-    // Past minStepIntervalMs, as a second real stride would be.
-    now.mockReturnValue(11_000);
-    for (const sample of gentleGaitCycle(9.8, 1.0, 0.35)) {
-      win.dispatch('devicemotion', sample);
-    }
+    // A little real-world variance (a brisker second stride) shouldn't matter.
+    dispatchGaitStep(win, now, clock, { ...gaitOpts, samplesPerHalf: 20, rateHz: 90 });
     expect(p.getStepCount()).toBe(2);
     p.stop();
   });
 
   it('does not register a step from idle hand jitter while standing still', async () => {
     const win = new FakeWindow();
+    const now = jest.spyOn(Date, 'now');
+    now.mockReturnValue(10_000);
     const p = new DeviceTrackingProvider({ window: win });
     await p.start();
     win.dispatch('deviceorientation', orientationEvent(0, 90, 0));
     win.dispatch('devicemotion', motionEvent(9.8));
 
-    for (let i = 0; i < 40; i += 1) {
-      const jitter = Math.sin(i * 1.3) * 0.35;
+    // ~5 seconds of small-amplitude noise at a realistic sampling rate,
+    // well under stepThreshold - not a step, just a hand holding the phone.
+    const rateHz = 60;
+    let t = 10_000;
+    for (let i = 0; i < rateHz * 5; i += 1) {
+      const jitter = Math.sin(i * 1.3) * 0.15 + Math.sin(i * 4.1) * 0.1;
       win.dispatch('devicemotion', motionEvent(9.8 + jitter));
+      t += 1000 / rateHz;
+      now.mockReturnValue(t);
     }
     expect(p.getStepCount()).toBe(0);
     p.stop();

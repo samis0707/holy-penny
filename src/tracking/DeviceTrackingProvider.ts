@@ -70,19 +70,26 @@ const DEFAULT_LOST_TIMEOUT_MS = 1500;
 const DEFAULT_STEP_THRESHOLD = 0.8;
 const DEFAULT_MIN_STEP_INTERVAL_MS = 250;
 /**
- * Exponential smoothing factor for the baseline (fraction of the gap to the
- * current reading it closes per sample). 0.1 (the original value) adapts
- * within roughly one stride's worth of samples, which sounds fine but is
- * actually the problem: it lets the baseline CHASE a gradual rise during the
- * ascent itself, closing the gap to the peak before `magnitude > baseline +
- * stepThreshold` is ever true - a footstep spread smoothly over many
- * samples (again, a phone held steady rather than swinging) could fail to
- * cross the threshold at all, independent of how low `stepThreshold` is set.
- * 0.05 makes the baseline slow enough that it cannot meaningfully track
- * anything on the timescale of a single stride, while still correcting for
- * genuine slow drift over many seconds.
+ * Time constant (seconds) for the baseline's exponential decay toward the
+ * current accelerometer magnitude: `alpha = 1 - exp(-dtSec / this)` per
+ * `devicemotion` sample, using the REAL elapsed time since the previous
+ * sample, not a fixed fraction per event.
+ *
+ * A fixed per-EVENT fraction (0.1 originally, still wrong at 0.05) makes the
+ * baseline's effective adaptation speed depend on the device's `devicemotion`
+ * sampling rate, which is not something this code controls and which varies
+ * hugely across real devices/browsers (commonly anywhere from ~15 Hz to
+ * ~100+ Hz). At a high sampling rate, the SAME per-event fraction closes the
+ * gap to a gradually-rising signal many more times within a single stride,
+ * so a gentle, gradual footstep - a phone held steady rather than swinging -
+ * could fail to ever cross `stepThreshold` above baseline, independent of
+ * how low that threshold is set, purely because the device happened to
+ * sample fast. A time-based decay makes the baseline's behaviour the same
+ * regardless of sampling rate: 2 seconds is comfortably longer than any
+ * single stride (typically well under 1s) so it cannot track a step's rise
+ * or fall, while still correcting for genuine drift over several seconds.
  */
-const BASELINE_SMOOTHING = 0.05;
+const BASELINE_TIME_CONSTANT_SEC = 2.0;
 const FPS_WINDOW_SAMPLES = 16;
 const MIN_LOST_TICK_MS = 100;
 const DEG_TO_RAD = Math.PI / 180;
@@ -245,6 +252,8 @@ export class DeviceTrackingProvider implements TrackingProvider {
   private hasBaseline = false;
   private peaked = false;
   private lastStepTime = 0;
+  /** Timestamp of the previous `devicemotion` sample, for time-based baseline decay. */
+  private lastMotionTime = 0;
 
   private tickHandle: ReturnType<typeof setInterval> | null = null;
 
@@ -429,12 +438,13 @@ export class DeviceTrackingProvider implements TrackingProvider {
       if (!Number.isFinite(magnitude)) {
         return;
       }
+      const now = Date.now();
       if (!this.hasBaseline) {
         this.baseline = magnitude;
         this.hasBaseline = true;
+        this.lastMotionTime = now;
         return;
       }
-      const now = Date.now();
       if (!this.peaked && magnitude > this.baseline + this.stepThreshold) {
         this.peaked = true;
       } else if (this.peaked && magnitude < this.baseline) {
@@ -450,8 +460,11 @@ export class DeviceTrackingProvider implements TrackingProvider {
       // baseline up to meet the elevated reading before the valley crossing
       // below it ever fires, silently swallowing the step.
       if (!this.peaked) {
-        this.baseline += (magnitude - this.baseline) * BASELINE_SMOOTHING;
+        const dtSec = Math.max(0, (now - this.lastMotionTime) / 1000);
+        const alpha = 1 - Math.exp(-dtSec / BASELINE_TIME_CONSTANT_SEC);
+        this.baseline += (magnitude - this.baseline) * alpha;
       }
+      this.lastMotionTime = now;
     } catch {
       // never throw out of a sensor callback
     }
@@ -624,6 +637,7 @@ export class DeviceTrackingProvider implements TrackingProvider {
       this.hasBaseline = false;
       this.peaked = false;
       this.lastStepTime = 0;
+      this.lastMotionTime = 0;
       this.setState('STOPPED');
     } catch {
       // never throw from stop()

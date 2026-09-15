@@ -141,12 +141,16 @@ sensors, so the pose is real:
   heading (0.7 m per step by default). That is what lets you walk up to the
   coin and collect it. The detector is tuned for a phone held steadily to
   watch the screen (a soft, gradual signal), not just a sharp pocket-swing
-  gait: the baseline it compares against adapts slowly (`BASELINE_SMOOTHING`)
-  so it cannot chase a gradual rise or a lingering plateau and silently
-  swallow the step, which is what made the coin feel uncollectable.
-  Collection itself has a generous 1.0 m radius (`Game`'s
-  `collectThreshold`), since the tracked position is pure dead reckoning
-  from an assumed step length, not a measurement of real distance walked.
+  gait: the baseline it compares against decays on a fixed TIME constant
+  (`BASELINE_TIME_CONSTANT_SEC`, using real elapsed time between samples),
+  not a fixed fraction per `devicemotion` event. A per-event fraction's
+  effective speed depends on the device's sampling rate, so it can chase a
+  gradual rise before the peak threshold is ever crossed on a device that
+  happens to sample fast - independent of how low the threshold is set -
+  which is what made the coin feel uncollectable. Collection itself has a
+  generous 1.0 m radius (`Game`'s `collectThreshold`), since the tracked
+  position is pure dead reckoning from an assumed step length, not a
+  measurement of real distance walked.
 
 On iOS 13+ both sensors need `requestPermission()`, which only works from a
 user gesture — hence the START AR button. `App.startAR()` requests tracking
